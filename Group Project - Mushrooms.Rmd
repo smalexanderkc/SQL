@@ -1,0 +1,742 @@
+---
+title: "Group Project - Mushrooms"
+authors: "Shawn Alexander, Nathan Dierkes, Kiley Marshall, Charles Williams"
+date: "2023-04-13"
+output: 
+  html_document: 
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r clean environment}
+rm(list = ls())
+```
+
+```{r}
+#getwd()
+```
+
+# 1. Load in Data
+
+```{r data load}
+df <- read.csv("Mushroom Data Set.csv", stringsAsFactors = T)
+```
+
+```{r}
+str(df)
+```
+
+```{r}
+summary(df)
+```
+
+
+## 1.2 Data Cleansing
+
+We note that the data has a column 'veil.type' with only one value; therefore, it can be omitted.   Additionally, the variable 'stalk.root' has a large number of unknown values "?" and will be omitted as well.
+
+```{r remove columns}
+df <- subset(df, select = -c(veil.type, stalk.root))
+```
+
+```{r new structure}
+str(df)
+```
+
+```{r response variable distribution}
+library(ggplot2)
+
+ggplot(df, aes(x = outcome)) + geom_bar()
+```
+
+We can see the distribution of poisonous and edible mushrooms is fairly even within the dataset.
+
+## 1.3 Dummy Variables
+
+All variables are categorical and will need to be converted to dummy variables for some operations.
+
+```{r create dummies}
+library(fastDummies)
+
+df_dummy <- dummy_cols(df, remove_first_dummy = T, remove_selected_columns = T)
+```
+
+```{r}
+x <- model.matrix(outcome_p ~ ., data = df_dummy)[, -1]
+y <- df_dummy$outcome_p
+
+colnames(x)
+```
+
+# 2. Quadratic Discriminant Analysis
+
+## 2.1 QDA without Cross Validation
+
+Perform QDA with all variables using a 70/30 train/test data split.
+
+```{r to numeric}
+# numeric data columns
+df_num <- data.frame(sapply(df, function(x) as.numeric(x)))
+str(df_num)
+```
+
+```{r data splt QDA}
+# 70% train 30% test
+index <- 1:nrow(df_num)
+set.seed(1)
+
+train_index <- sample(index, round(length(index)*0.7))
+
+train_set <- df_num[train_index,]
+test_set <- df_num[-train_index,]
+```
+
+Training QDA model.
+
+```{r train QDA}
+library(MASS)
+
+qda.fit <- qda(outcome ~ ., data = train_set)
+qda.fit
+```
+
+We will create a function to print out the measures of our models.
+
+```{r print measures function}
+print_measures <- function(measures){
+  for(i in 1:length(measures)) {
+    cat(names(measures[[i]])[1],':\n Mean = ', mean(measures[[i]]),"; ",
+    'Standard Deviation = ',sd(measures[[i]]), ";\n",
+    '95% Confidence Interval = [',
+    mean(measures[[i]]) - sd(measures[[i]]) * 1.96, ", ",
+    mean(measures[[i]]) + sd(measures[[i]]) * 1.96,"]\n\n")
+    }
+}
+```
+
+Evaluate QDA model using balanced accuracy, sensitivity, and specificity.
+
+```{r QDA measures 1}
+library(caret)
+
+qda.pred = predict(qda.fit, test_set)
+
+b_accuracies <- confusionMatrix(factor(qda.pred$class),
+                                as.factor(test_set$outcome),
+                                positive = "2")$byClass['Balanced Accuracy']
+sensitivities <- confusionMatrix(factor(qda.pred$class),
+                                as.factor(test_set$outcome),
+                                positive = "2")$byClass['Sensitivity']
+specificities <- confusionMatrix(factor(qda.pred$class),
+                                as.factor(test_set$outcome),
+                                positive = "2")$byClass['Specificity']
+
+measures_qda <- list(b_accuracies, sensitivities, specificities)
+measures_qda
+```
+
+## 2.2 QDA with Cross Validation
+
+Train a QDA model with 5-fold cross validation.
+
+```{r QDA CV function}
+library(MASS)
+
+k_folds_qda <- function(k) {
+    folds <- createFolds(df_num$outcome, k = k, list = TRUE, returnTrain = TRUE)
+    b_accuracies <- c()
+    sensitivities <- c()
+    specificities <- c()
+    
+    for (i in 1:k) {
+        model <- qda(outcome ~ ., data = df_num[folds[[i]],])
+        
+        pred_class_cv <- predict(object = model,
+                                newdata = df_num[-folds[[i]],])
+        
+        b_accuracies <- c(b_accuracies,
+                          confusionMatrix(factor(pred_class_cv$class),
+                                          as.factor(df_num[-folds[[i]], ]$outcome),
+                                          positive = "1")$byClass['Balanced Accuracy'])
+        sensitivities <- c(sensitivities,
+                          confusionMatrix(factor(pred_class_cv$class),
+                                          as.factor(df_num[-folds[[i]], ]$outcome),
+                                          positive = "1")$byClass['Sensitivity'])
+        specificities <- c(specificities,
+                           confusionMatrix(factor(pred_class_cv$class),
+                                          as.factor(df_num[-folds[[i]], ]$outcome),
+                                          positive = "1")$byClass['Specificity'])
+    }
+    
+    list(b_accuracies, sensitivities, specificities)
+}
+```
+
+Evaluate QDA with CV, k folds = 5.
+
+```{r QDA w CV5}
+set.seed(1)
+
+measures_qda_cv5 <- k_folds_qda(5)
+measures_qda_cv5
+```
+
+Evaluate QDA with CV, k folds = 10.
+
+```{r QDA w CV10}
+set.seed(1)
+
+measures_qda_cv10 <- k_folds_qda(10)
+measures_qda_cv10
+```
+
+## QDA Repeated CV
+
+increase repeats for final model
+
+```{r}
+fitControl_rcv <- trainControl(method = "repeatedcv", number = 5,
+repeats = 10,
+classProbs = TRUE,
+summaryFunction = twoClassSummary)
+
+set.seed(123)
+qda_rcv <- train(factor(ifelse(outcome==2, 'Poisonous', 'Edible'), levels = c('Poisonous', 'Edible')) ~ ., data = df_num,
+trControl = fitControl_rcv,
+method="qda",
+metric = "Spec")
+print(qda_rcv)
+
+```
+
+```{r}
+confusionMatrix(qda_rcv)
+```
+
+
+## 2.3 Compare QDA Results
+
+QDA without CV:
+
+```{r measures QDA}
+print_measures(measures_qda)
+```
+
+QDA with CV k=5:
+
+```{r measures QDA CV5}
+print_measures(measures_qda_cv5)
+```
+
+QDA with CV k=10:
+
+```{r measures QDA CV10}
+print_measures(measures_qda_cv10)
+```
+
+Cross validation with 5 folds has the best performance compared to without CV and CV with 10 folds.
+
+# 3. LDA
+
+## 3.1 LDA without CV
+
+```{r}
+lda.fit <- lda(outcome ~ ., data = train_set)
+lda.fit
+```
+
+```{r}
+lda.pred = predict(lda.fit, test_set)
+
+b_accuracies <- confusionMatrix(factor(qda.pred$class),
+                                as.factor(test_set$outcome),
+                                positive = "2")$byClass['Balanced Accuracy']
+sensitivities <- confusionMatrix(factor(qda.pred$class),
+                                as.factor(test_set$outcome),
+                                positive = "2")$byClass['Sensitivity']
+specificities <- confusionMatrix(factor(qda.pred$class),
+                                as.factor(test_set$outcome),
+                                positive = "2")$byClass['Specificity']
+
+measures_lda <- list(b_accuracies, sensitivities, specificities)
+measures_lda
+```
+
+## 3.2 LDA with CV
+
+```{r}
+k_folds_lda <- function(k) {
+    folds <- createFolds(df_num$outcome, k = k, list = TRUE, returnTrain = TRUE)
+    b_accuracies <- c()
+    sensitivities <- c()
+    specificities <- c()
+    
+    for (i in 1:k) {
+        model <- lda(outcome ~ ., data = df_num[folds[[i]],])
+        
+        pred_class_cv <- predict(object = model,
+                                newdata = df_num[-folds[[i]],])
+        
+        b_accuracies <- c(b_accuracies,
+                          confusionMatrix(factor(pred_class_cv$class),
+                                          as.factor(df_num[-folds[[i]], ]$outcome),
+                                          positive = "1")$byClass['Balanced Accuracy'])
+        sensitivities <- c(sensitivities,
+                          confusionMatrix(factor(pred_class_cv$class),
+                                          as.factor(df_num[-folds[[i]], ]$outcome),
+                                          positive = "1")$byClass['Sensitivity'])
+        specificities <- c(specificities,
+                           confusionMatrix(factor(pred_class_cv$class),
+                                          as.factor(df_num[-folds[[i]], ]$outcome),
+                                          positive = "1")$byClass['Specificity'])
+    }
+    
+    list(b_accuracies, sensitivities, specificities)
+}
+```
+
+
+
+```{r}
+set.seed(1)
+
+measures_lda_cv5 <- k_folds_lda(5)
+measures_lda_cv5
+```
+
+## 3.3 Compare LDA results
+
+```{r}
+print_measures(measures_lda)
+```
+
+
+```{r}
+print_measures(measures_lda_cv5)
+```
+
+When using repeated 5 fold cross validation, it appears that QDA represents the data better than LDA. When comparing the original QDA fit with the cross-validated version, the cross validated version has a higher sensitivity, specificity, and balanced accuracy indicating that because more data and more combinations of data was used to train the model it is therefore, more robust and can better predict if mushrooms are edible or poisonous based on the given variables.
+
+# Logit K Fold Cross Validation (ERRORS)
+
+```{r}
+# fitControl_rcv <- trainControl(method = "repeatedcv", number = 5,
+# repeats = 200,
+# classProbs = TRUE,
+# summaryFunction = twoClassSummary)
+# 
+# logit_train_set <- train_set
+# logit_train_set$outcome <- ifelse(logit_train_set$outcome == 1, 0, 1)
+# 
+# set.seed(123)
+# logit_rcv <- train(factor(ifelse(logit_train_set$outcome==1, 'Poisonous', 'Edible'), levels = c('Poisonous', 'Edible')) ~ ., data = logit_train_set[,-ncol(logit_train_set)],
+# trControl = fitControl_rcv,
+# method="glm", family=binomial(link='logit'),
+# metric = "ROC")
+# print(logit_rcv)
+```
+
+# 4. Bootstrapping
+
+## 4.1 Bootstrap Execution
+
+Set number of bootstraps to 100
+
+```{r}
+# Set the number of bootstraps
+n_bootstraps <- 1000
+# Initiate vectors of performance metric
+bootstrap_qda <- NULL
+# bootstrap_logit <- NULL
+bootstrap_lda <- NULL
+
+
+#Set the random number seed
+set.seed(100)
+for (i in 1:n_bootstraps){
+# Get a bootstrap of test dataset
+bootstrap_test <- test_set[sample(nrow(test_set), replace = TRUE),]
+
+# Calculate predicted outcome
+qda_boot_pred <- predict(qda.fit, newdata = bootstrap_test)
+#LOGIT OUTCOME**
+lda_boot_pred <- predict(lda.fit, newdata = bootstrap_test)
+
+# Calculate f1 score of the qda model using the bootstrap
+bootstrap_qda <- c(bootstrap_qda, mean(qda_boot_pred$class == bootstrap_test$outcome))
+# Calculate accuracy of the logit model using the bootstrap
+
+# Calculate f1 score of the lda model using the bootstrap
+bootstrap_lda <- c(bootstrap_lda, mean(lda_boot_pred$class == bootstrap_test$outcome))
+}
+```
+
+## 4.2 Bootstrap Results
+
+QDA Bootstrap results:
+
+```{r}
+summary(bootstrap_qda)
+```
+
+LDA Bootstrap results:
+
+```{r}
+summary(bootstrap_lda)
+```
+
+Histograms of Accuracy:
+
+```{r}
+par(mfrow=c(1,2))
+hist(bootstrap_qda,main = "Histogram of QDA Accuracy")
+#add in logit histogram 
+hist(bootstrap_lda, main = "Histogram of LDA Accuracy")
+```
+
+95% Confidence Intervals
+
+```{r}
+cat("95% CI of QDA = ",
+    "(",
+quantile(bootstrap_qda, 0.025),
+", ",
+quantile(bootstrap_qda, 0.975),") \n")
+
+
+
+cat("95% CI of LDA = ",
+    "(",
+quantile(bootstrap_lda, 0.025),
+", ",
+quantile(bootstrap_lda, 0.975),")")
+
+# cat("95% CI of Logit = ",
+#     "(",
+# quantile(bootstrap_logit, 0.025),
+# ", ",
+# quantile(bootstrap_logit, 0.975),")")
+```
+
+95% Confidence Intervals - Normal Approx.
+
+```{r}
+cat("95% CI of QDA (normal approximation) = ",
+"(",
+mean(bootstrap_qda, 0.025)-1.96*sd(bootstrap_qda),
+", ",
+mean(bootstrap_qda, 0.025)+1.96*sd(bootstrap_qda),
+") \n")
+
+cat("95% CI of QDA (normal approximation) = ",
+"(",
+mean(bootstrap_qda, 0.025)-1.96*sd(bootstrap_qda),
+", ",
+mean(bootstrap_qda, 0.025)+1.96*sd(bootstrap_qda),
+")")
+
+# cat("95% CI of Logit (normal approximation) = ",
+# "(",
+# mean(bootstrap_logit, 0.025)-1.96*sd(bootstrap_logit),
+# ", ",
+# mean(bootstrap_logit, 0.025)+1.96*sd(bootstrap_logit),
+# ")")
+```
+
+# 4. K-Nearest Neighbors (KNN)
+
+## 3.1 Data split for KNN
+
+```{r data splt KNN}
+# 70% train 30% test
+index <- 1:nrow(df_dummy)
+set.seed(1)
+
+train_index <- sample(index, round(length(index)*0.7))
+
+train_set_KNN <- df_dummy[train_index,]
+test_set_KNN <- df_dummy[-train_index,]
+```
+
+## 3.2 Train KNN
+
+```{r KNN train}
+library(class)
+
+y <- train_set_KNN[,"outcome_p"]
+
+# Start with K = 5
+
+knn5 <- knn(train_set_KNN[,-1],test_set_KNN[,-1], y, k=5)
+```
+
+## 3.3 Evaluate Initial KNN
+
+KNN results when k = 5:
+
+```{r measures KNN5}
+b_accuracies_knn <- confusionMatrix(factor(knn5),
+                                factor(test_set_KNN$outcome_p),
+                                positive = "1")$byClass['Balanced Accuracy']
+sensitivities_knn <- confusionMatrix(factor(knn5),
+                                factor(test_set_KNN$outcome_p),
+                                positive = "1")$byClass['Sensitivity']
+specificities_knn <- confusionMatrix(factor(knn5),
+                                factor(test_set_KNN$outcome_p),
+                                positive = "1")$byClass['Specificity']
+
+measures_knn5 <- list(b_accuracies_knn, sensitivities_knn, specificities_knn)
+measures_knn5
+```
+
+## 3.4 Tuning Hyperparameter k
+
+```{r KNN tune k}
+accuracy <- NULL
+sensitivity <- NULL
+specificity <- NULL
+
+old_time <- Sys.time()
+
+for(i in 1:50){
+  knn.fit <- knn(train_set_KNN[,-1],test_set_KNN[,-1], y, k=i)
+  accuracy <- c(accuracy, mean(knn.fit == test_set_KNN$outcome_p))
+  sensitivity <- c(sensitivity, sensitivity(knn.fit, factor(test_set_KNN$outcome_p), positive = "1"))
+  specificity <- c(specificity, specificity(knn.fit, factor(test_set_KNN$outcome_p), negative = "0"))
+}
+
+bac <- (sensitivity + specificity)/2
+
+new_time <- Sys.time()
+
+cat('Time spent trying values of k: ', new_time - old_time,' seconds.')
+```
+
+Graphing the results to represent the effects of k.  Note the y axis limits are [0.95, 1] since the results are so close to 1.
+
+```{r KNN plot k}
+plot(1:50, accuracy, type = "l" ,col = "red", 
+     ylab = "Measures", xlab = "k",ylim = c(0.95, 1.0))
+
+lines(1:50, sensitivity, type = "l", col = "blue")
+
+lines(1:50, specificity, type = "l", col = "green")
+
+lines(1:50, bac, type = "l", col = "orange")
+
+legend("bottomleft", legend = c("accuracy","sensitivity","specificity", "balanced accuracy"),
+       col = c("red","blue","green","orange"), lty = 1)
+```
+
+Using all of the measures, k = 4 is the best value.
+
+```{r KNN final}
+results_knn4 <- list(sensitivity[4], specificity[4], bac[4])
+results_knn4
+```
+
+# Decision Trees
+
+## OneR
+
+OneR, short for "One Rule", is a simple, yet accurate, classification algorithm that generates one rule for each predictor in the data, then selects the rule with the smallest total error as its "one rule".
+
+```{r}
+library(RWeka)
+
+mushroom_1R <- OneR(outcome ~., data = df)
+mushroom_1R
+```
+
+Odor was selected as the main rule to use.  
+
+## OneR Results
+
+```{r}
+summary(mushroom_1R)
+```
+
+OneR classified 120 poisonous mushrooms as edible - which means this model could be dangerous.  
+
+## JRip
+
+JRip is a bottom–up method learns rules by treating particular judgment of the examples in the training data as a class and finding the set of rules covering all the members of the class.
+
+```{r}
+m <- JRip(outcome ~., data = df)
+m
+```
+
+Rules:
+
+- If odor is foul, then the mushroom type is poisonous.
+
+- If the gill size is narrow and the fill color is buff, then the mushroom type is poisonous
+
+- If the gill size is narrow and the odor is pungent, then the mushroom type is poisonous
+
+- Else, the mushroom is edible. 
+
+## JRip Results
+
+```{r}
+summary(m)
+```
+
+No poisonous mushrooms were classified as edible.
+
+# SVM ANN
+
+```{r}
+library(readxl)
+library(openxlsx)
+library(inspectdf)
+library(dplyr)
+library(corrr)
+library(e1071)
+library(caret)
+library(knitr)
+library(visdat)
+library(leaps)
+library(glmnet)
+library(neuralnet)
+library(purrr)
+```
+
+```{r}
+mushrooms <- df
+```
+
+
+```{r}
+
+# colnames(mushrooms) <- c("cap_shape", "cap_surface", "cap_color", "bruises", "odor", "gill_attachment", "gill_spacing", "gill_size", "gill_color", "stalk_shape", "stalk_root", "stalk_surface_above_ring", "stalk_surface_below_ring", "stalk_color_above_ring", "stalk_color_below_ring", "veil_type", "veil_color", "ring_number", "ring_type", "spore_print_color", "population", "habitat", "edibility")
+# 
+# head(mushrooms)
+
+```
+
+```{r}
+# Defining the levels for the categorical variables 
+## We make each variable as a factor
+mushrooms <- mushrooms %>% map_df(function(.x) as.factor(.x))
+
+## We redefine each of the category for each of the variables
+levels(mushrooms$outcome) <- c("edible", "poisonous")
+levels(mushrooms$cap.shape) <- c("bell", "conical", "flat", "knobbed", "sunken", "convex")
+levels(mushrooms$cap.color) <- c("buff", "cinnamon", "red", "gray", "brown", "pink", 
+                                "green", "purple", "white", "yellow")
+levels(mushrooms$cap.surface) <- c("fibrous", "grooves", "scaly", "smooth")
+levels(mushrooms$bruises.) <- c("no", "yes")
+levels(mushrooms$odor) <- c("almond", "creosote", "foul", "anise", "musty", "none", "pungent", "spicy", "fishy")
+levels(mushrooms$gill.attachment) <- c("attached", "free")
+levels(mushrooms$gill.spacing) <- c("close", "crowded")
+levels(mushrooms$gill.size) <- c("broad", "narrow")
+levels(mushrooms$gill.color) <- c("buff", "red", "gray", "chocolate", "black", "brown", "orange", 
+                                 "pink", "green", "purple", "white", "yellow")
+levels(mushrooms$stalk.shape) <- c("enlarging", "tapering")
+# stalk.root taken out of dataset
+# levels(mushrooms$stalk.root) <- c("missing", "bulbous", "club", "equal", "rooted")
+levels(mushrooms$stalk.surface.above.ring) <- c("fibrous", "silky", "smooth", "scaly")
+levels(mushrooms$stalk.surface.below.ring) <- c("fibrous", "silky", "smooth", "scaly")
+levels(mushrooms$stalk.color.above.ring) <- c("buff", "cinnamon", "red", "gray", "brown", "pink", 
+                                "green", "purple", "white", "yellow")
+levels(mushrooms$stalk.color.below.ring) <- c("buff", "cinnamon", "red", "gray", "brown", "pink", 
+                                "green", "purple", "white", "yellow")
+# veil.type taken out of dataset
+#levels(mushrooms$veil.type) <- "partial"
+levels(mushrooms$veil.color) <- c("brown", "orange", "white", "yellow")
+levels(mushrooms$ring.number) <- c("none", "one", "two")
+levels(mushrooms$ring.type) <- c("evanescent", "flaring", "large", "none", "pendant")
+levels(mushrooms$spore.print.color) <- c("buff", "chocolate", "black", "brown", "orange", 
+                                        "green", "purple", "white", "yellow")
+levels(mushrooms$population) <- c("abundant", "clustered", "numerous", "scattered", "several", "solitary")
+levels(mushrooms$habitat) <- c("wood", "grasses", "leaves", "meadows", "paths", "urban", "waste")
+
+head(mushrooms)
+```
+
+
+```{r}
+mushrooms %>%
+  summarise_all(funs(n_distinct(.)))
+
+```
+
+
+```{r}
+# Remove the 'veil-type' variable
+# mushrooms <- subset(mushrooms, select = -veil_type)
+
+visdat::vis_dat(mushrooms)
+```
+
+
+
+```{r}
+mushrooms <- mushrooms %>% 
+  mutate_all(as.numeric)
+
+train_index <- sample(1:nrow(mushrooms), 0.7*nrow(mushrooms))
+mush_train <- mushrooms[train_index, ]
+mush_test <- mushrooms[-train_index, ]
+dim(mush_train)
+```
+
+```{r}
+summary(mush_train)
+```
+
+
+
+```{r}
+svm_model <- svm(outcome ~ . , data = mush_train, cost = 1, gamma = 0.01)
+
+svm_pred = predict(svm_model, newdata = mush_test)
+```
+
+
+```{r}
+# Define the neural network model
+nn_model <- neuralnet(outcome ~ ., data = mush_train, hidden = c(5, 2))
+
+# Predict on the test set
+nn_pred <- predict(nn_model, mush_test[, 1:21])
+
+# Convert the predictions to binary (0 or 1)
+nn_pred <- ifelse(nn_pred > 0.5, 1, 0)
+```
+
+```{r}
+actual1 <- as.factor(mush_test$outcome)
+predicted1 <- as.factor(ifelse(svm_pred == 1, "edible", "poisonous"))
+
+# Check levels of predicted and actual values
+levels(predicted1)
+levels(actual1)
+
+summary(predicted1)
+summary(actual1)
+```
+
+```{r}
+actual <- as.factor(mush_test$outcome)
+predicted <- as.factor(ifelse(nn_pred == 1, "edible", "poisonous"))
+
+# Check levels of predicted and actual values
+levels(predicted)
+levels(actual)
+
+# Convert predicted and actual values to the same levels
+predicted <- factor(predicted, levels = c("edible", "poisonous"))
+actual <- factor(actual, levels = c("edible", "poisonous"))
+
+summary(actual)
+summary(predicted)
+```
+
+
+
